@@ -21,15 +21,18 @@ defaults:
 
 jobs:
   eval:
+    name: Evaluate
     runs-on: ubuntu-latest
     outputs:
       checks: ${{ steps.checks.outputs.checks }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - &nix
+        name: Install Nix
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       - &ssh
-        name: Configure builders
+        name: Set up builders
         if: inputs.builders != ''
         run: |
           mkdir -p -m 700 ~/.ssh
@@ -49,8 +52,9 @@ jobs:
         env:
           BUILDERS: ${{ inputs.builders }}
           BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
-      - run: nix flake check --no-build
-      - name: List checks
+      - name: Evaluate flake
+        run: nix flake check --no-build
+      - name: Find checks
         id: checks
         run: |
           checks=$(
@@ -81,7 +85,7 @@ jobs:
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
         env:
           BUILDERS: ${{ inputs.builders }}
-      - name: Copy derivations to builders
+      - name: Send checks to builders
         if: inputs.builders != ''
         run: |
           for store in $(jq -r '.[].store | select(. != "")' <<< "$CHECKS" | sort -u); do
@@ -100,17 +104,20 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.eval.outputs.checks) }}
     steps:
-      - if: matrix.store == ''
+      - name: Checkout
+        if: matrix.store == ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - *nix
       - *ssh
-      - if: matrix.store == ''
-        run: nix build -L --no-link ".#checks.$SYSTEM.\"$NAME\""
+      - name: Build
+        run: |
+          if [[ -n $STORE ]]; then
+            nix build -L --no-link --store "$STORE" "$DRV^*"
+          else
+            nix build -L --no-link ".#checks.$SYSTEM.\"$NAME\""
+          fi
         env:
           SYSTEM: ${{ matrix.system }}
           NAME: ${{ matrix.name }}
-      - if: matrix.store != ''
-        run: nix build -L --no-link --store "$STORE" "$DRV^*"
-        env:
           STORE: ${{ matrix.store }}
           DRV: ${{ matrix.drv }}
