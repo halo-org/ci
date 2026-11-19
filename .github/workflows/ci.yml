@@ -7,10 +7,6 @@ on:
         description: Remote builders in the Nix machines format, one per line.
         type: string
         default: ""
-      pin:
-        description: Name to pin the checks under on each builder used, after a push to the default branch.
-        type: string
-        default: ""
     secrets:
       builder-ssh-key:
         description: SSH private key for every builder.
@@ -118,22 +114,3 @@ jobs:
         env:
           STORE: ${{ matrix.store }}
           DRV: ${{ matrix.drv }}
-
-  pin:
-    needs: [eval, build]
-    if: inputs.pin != '' && inputs.builders != '' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
-    steps:
-      - *ssh
-      - run: |
-          if [[ ! $PIN =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "pin must contain only letters, digits, '.', '_' and '-'" >&2
-            exit 1
-          fi
-          for store in $(jq -r '.[].store | select(. != "")' <<< "$CHECKS" | sort -u); do
-            host=${store#*://}
-            jq -r --arg store "$store" '.[] | select(.store == $store) | .drv' <<< "$CHECKS" | ssh "ssh://${host%%\?*}" pin "$PIN"
-          done
-        env:
-          CHECKS: ${{ needs.eval.outputs.checks }}
-          PIN: ${{ inputs.pin }}
