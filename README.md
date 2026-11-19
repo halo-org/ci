@@ -52,10 +52,10 @@ produces, to merge into `checks.<system>`:
 
 - `package-<name>` builds a package. A package that is the same derivation as
   another, such as `default`, is not checked twice.
-- `image-<name>` builds an image and checks the layout: its image index lists
-  one image manifest per platform, and every blob is present with the size
-  and digest that refer to it.
-- `component-<name>` builds a component and checks that it is a valid
+- `oci-image-<name>` builds an image and checks the layout: its image index
+  lists one image manifest per platform, and every blob is present with the
+  size and digest that refer to it.
+- `wasm-component-<name>` builds a component and checks that it is a valid
   WebAssembly component and not a core module.
 
 The checks for a system cover the artifacts under that system. Outputs a flake

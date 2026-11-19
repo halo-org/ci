@@ -94,13 +94,13 @@
         system:
         self.lib.outputChecks self system
         // lib.optionalAttrs (system == "x86_64-linux") {
-          image-rejects-incomplete-layout = pkgs.testers.testBuildFailure' {
+          oci-image-rejects-incomplete-layout = pkgs.testers.testBuildFailure' {
             drv =
-              (self.lib.outputChecks { ociImages.${system}.incomplete = incomplete; } system).image-incomplete;
+              (self.lib.outputChecks { ociImages.${system}.incomplete = incomplete; } system).oci-image-incomplete;
             expectedBuilderLogEntries = [ "is missing" ];
           };
-          component-rejects-module = pkgs.testers.testBuildFailure' {
-            drv = (self.lib.outputChecks { wasmComponents.${system}.module = module; } system).component-module;
+          wasm-component-rejects-module = pkgs.testers.testBuildFailure' {
+            drv = (self.lib.outputChecks { wasmComponents.${system}.module = module; } system).wasm-component-module;
             expectedBuilderLogEntries = [ "is a core WebAssembly module, not a component" ];
           };
         }
