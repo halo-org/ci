@@ -24,14 +24,14 @@ let
 
   image =
     name: drv:
-    pkgs.runCommand "image-${name}" { nativeBuildInputs = [ pkgs.jq ]; } ''
+    pkgs.runCommand "oci-image-${name}" { nativeBuildInputs = [ pkgs.jq ]; } ''
       bash ${./oci-layout.sh} ${drv}
       touch $out
     '';
 
   component =
     name: drv:
-    pkgs.runCommand "component-${name}" { nativeBuildInputs = [ pkgs.wasm-tools ]; } ''
+    pkgs.runCommand "wasm-component-${name}" { nativeBuildInputs = [ pkgs.wasm-tools ]; } ''
       wasm-tools validate --features all ${drv}
       wasm-tools print --skeleton ${drv} --output skeleton.wat
       if [[ $(head --bytes 10 skeleton.wat) != "(component" ]]; then
@@ -42,5 +42,5 @@ let
     '';
 in
 checks "package" (_: drv: drv) (lib.getAttrs packageNames packages)
-// checks "image" image (flake.ociImages.${system} or { })
-// checks "component" component (flake.wasmComponents.${system} or { })
+// checks "oci-image" image (flake.ociImages.${system} or { })
+// checks "wasm-component" component (flake.wasmComponents.${system} or { })
