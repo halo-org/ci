@@ -83,6 +83,71 @@ does not have produce no checks. The library depends only on nixpkgs.
 }
 ```
 
+### Images
+
+`lib.ociImage system { ... }` builds an image for an `ociImages` entry. It
+needs only nixpkgs: there is no Docker, daemon or base image.
+
+```nix
+ociImages.x86_64-linux.app = ci.lib.ociImage "x86_64-linux" {
+  name = "app";
+  entrypoint = [ (lib.getExe app) ];
+  env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+  layers = [ pkgs.glibc pkgs.cacert ];
+};
+```
+
+- `name`: the name of the derivation.
+- `entrypoint`: the command the image runs, as a list of strings.
+- `env`: environment variables. Optional.
+- `layers`: packages that get layers of their own, from the bottom up.
+  Optional.
+
+The image holds the closure of the store paths that `entrypoint` and `env`
+refer to, at their paths in `/nix/store`, and nothing else. There is no shell
+and no `/etc` or `/tmp`. The image is for the platform of `system`, which also
+builds it.
+
+Each package in `layers` gets a layer that holds its closure, except what lower
+layers hold. A last layer holds the rest of the image. Each layer is its own
+derivation and depends only on its packages and those below it. When only the
+application changes, only the last layer is built again and the other layers
+keep their digests, so a registry that has them does not receive them again.
+Give the parts of the closure that rarely change their own layers, such as
+libc, certificates or a language runtime. A package that is not in the image's
+closure fails the build.
+
+The same derivation always builds the same image. Layers are tar archives with
+sorted entries, hard links stored as files, and fixed times, owners and modes.
+They are compressed with gzip, without a name or time in the header. The
+image's creation time is `1970-01-01T00:00:01Z`, and it uses OCI media types.
+Every image holds a copy of its layers and refers to no other store paths, so
+copying it copies only the image.
+
+`lib.ociImageIndex system { name, images }` combines images for different
+platforms into one image, built on `system`. Each image is an OCI image layout
+like those `lib.ociImage` builds and is built on its own system, so building
+the result needs a builder for each.
+
+```nix
+let
+  image = system: ci.lib.ociImage system {
+    name = "app";
+    entrypoint = [ (lib.getExe self.packages.${system}.app) ];
+  };
+in
+{
+  ociImages.x86_64-linux.app = ci.lib.ociImageIndex "x86_64-linux" {
+    name = "app";
+    images = [ (image "x86_64-linux") (image "aarch64-linux") ];
+  };
+}
+```
+
+The result's image index lists the manifests of every image. Two images for
+the same platform fail the build. An index of a single image that
+`lib.ociImage` built is the same image.
+
 ### Schemas
 
 The standard [flake schemas](https://manual.determinate.systems/protocols/flake-schemas.html)
@@ -268,17 +333,21 @@ It prints each reference it pushed with its digest.
 
 On pull requests, this repository calls the workflow on its own flake. Its
 checks come from `lib.outputChecks`. A trivial package for each supported
-system covers the path without builders on both kinds of runner. A small image
-and component cover their checks, and a core module must fail the component
-check. Another job shows and checks the flake with Determinate Nix, using only
+system covers the path without builders on both kinds of runner. An image built
+with `lib.ociImage`, an image for two platforms built by hand and a component
+cover their checks, and a core module must fail the component check. The image
+built with `lib.ociImage` must hold exactly its closure, an index of it alone
+must be the same image, and an index of it twice must fail. An image of a tool
+the builder uses itself, and an index of it, must have no references in the Nix
+store. Another job shows and checks the flake with Determinate Nix, using only
 its exported schema.
 
 The `publish-oci-registry-pushes-artifacts` check starts a registry that
-requires a login inside the Nix build. It publishes the image and the
+requires a login inside the Nix build. It publishes both images and the
 component under two tags with the program the publishing workflow runs, then
-pulls them back. Every blob of the image must match the built layout, the
-component must match byte for byte, and both tags must refer to the same
-manifest. The publishing workflow itself is not run on pull requests, because
-its jobs cannot reach a registry without credentials for a real one. Its
-evaluation, the jobs it starts and the way they fetch from builders are only
-tested by calling it.
+pulls them back. Each image must come back with the same image index digest
+and every blob of the built layout, the component must match byte for byte,
+and both tags must refer to the same manifest. The publishing workflow itself
+is not run on pull requests, because its jobs cannot reach a registry without
+credentials for a real one. Its evaluation, the jobs it starts and the way
+they fetch from builders are only tested by calling it.

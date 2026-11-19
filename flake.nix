@@ -23,7 +23,14 @@
         }
       '';
 
-      image = pkgs.runCommand "hello-image" { nativeBuildInputs = [ pkgs.jq ]; } ''
+      image = self.lib.ociImage "x86_64-linux" {
+        name = "hello-image";
+        entrypoint = [ (lib.getExe pkgs.hello) ];
+        env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+        layers = [ pkgs.glibc pkgs.cacert ];
+      };
+
+      twoPlatforms = pkgs.runCommand "hello-two-platforms" { nativeBuildInputs = [ pkgs.jq ]; } ''
         mkdir -p $out/blobs/sha256
         add() {
           local digest
@@ -61,7 +68,7 @@
       '';
 
       incomplete = pkgs.runCommand "incomplete-image" { nativeBuildInputs = [ pkgs.jq ]; } ''
-        cp --recursive ${image} $out
+        cp --recursive ${twoPlatforms} $out
         chmod --recursive u+w $out
         index=$(jq --raw-output '.manifests[0].digest | sub(":"; "/")' $out/index.json)
         manifest=$(jq --raw-output '.manifests[0].digest | sub(":"; "/")' $out/blobs/$index)
@@ -69,7 +76,11 @@
       '';
     in
     {
-      lib.outputChecks = import ./output-checks.nix nixpkgs;
+      lib = {
+        outputChecks = import ./output-checks.nix nixpkgs;
+        ociImage = import ./oci-image.nix nixpkgs;
+        ociImageIndex = import ./oci-image-index.nix nixpkgs;
+      };
 
       exportedSchemas = import ./schemas.nix;
 
@@ -98,7 +109,10 @@
         }
       );
 
-      ociImages.x86_64-linux.hello-image = image;
+      ociImages.x86_64-linux = {
+        hello-image = image;
+        hello-two-platforms = twoPlatforms;
+      };
 
       wasmComponents.x86_64-linux.hello = component;
 
@@ -111,6 +125,36 @@
               (self.lib.outputChecks { ociImages.${system}.incomplete = incomplete; } system).oci-image-incomplete;
             expectedBuilderLogEntries = [ "is missing" ];
           };
+          oci-image-holds-closure = pkgs.runCommand "oci-image-holds-closure" { nativeBuildInputs = [ pkgs.jq ]; } ''
+            index=$(jq --raw-output '.manifests[0].digest | sub(":"; "/")' ${image}/index.json)
+            manifest=$(jq --raw-output '.manifests[0].digest | sub(":"; "/")' ${image}/blobs/$index)
+            for layer in $(jq --raw-output '.layers[].digest | sub(":"; "/")' ${image}/blobs/$manifest); do
+              tar --list --file ${image}/blobs/$layer
+            done | sed --quiet 's|^nix/store/\([^/]\+\)/\?$|/nix/store/\1|p' | sort > paths
+            sort ${pkgs.closureInfo { rootPaths = [ pkgs.hello pkgs.cacert ]; }}/store-paths | diff - paths
+            touch $out
+          '';
+          oci-image-has-no-references =
+            let
+              withoutReferences = drv: drv.overrideAttrs { outputChecks.out.allowedReferences = [ ]; };
+              jq = withoutReferences (self.lib.ociImage system {
+                name = "jq-image";
+                entrypoint = [ (lib.getExe pkgs.jq) ];
+              });
+            in
+            withoutReferences (self.lib.ociImageIndex system { name = "jq-index"; images = [ jq ]; });
+          oci-image-index-keeps-one-image = pkgs.runCommand "oci-image-index-keeps-one-image" { } ''
+            cmp ${image}/index.json ${self.lib.ociImageIndex system { name = "hello-index"; images = [ image ]; }}/index.json
+            touch $out
+          '';
+          oci-image-index-rejects-shared-platform = pkgs.testers.testBuildFailure' {
+            drv = self.lib.ociImageIndex system {
+              name = "hello-twice";
+              images = [ image image ];
+            };
+            expectedBuilderExitCode = 5;
+            expectedBuilderLogEntries = [ "more than one image for linux/amd64" ];
+          };
           wasm-component-rejects-module = pkgs.testers.testBuildFailure' {
             drv = (self.lib.outputChecks { wasmComponents.${system}.module = module; } system).wasm-component-module;
             expectedBuilderLogEntries = [ "is a core WebAssembly module, not a component" ];
@@ -120,6 +164,7 @@
               pkgs.apacheHttpd
               pkgs.curl
               pkgs.distribution
+              pkgs.jq
               pkgs.skopeo
               pkgs.wkg
               self.packages.${system}.publish-oci-registry
@@ -151,13 +196,18 @@
 
             export REGISTRY_USERNAME=user REGISTRY_PASSWORD=password
             publish-oci-registry oci-image ${image} 127.0.0.1:5000/image one two
+            publish-oci-registry oci-image ${twoPlatforms} 127.0.0.1:5000/two-platforms one two
             publish-oci-registry wasm-component ${component} 127.0.0.1:5000/component one two
 
             export DOCKER_CONFIG=$PWD/docker REGISTRY_AUTH_FILE=$PWD/docker/config.json
             skopeo login --username user --password-stdin 127.0.0.1:5000 <<< password
             for tag in one two; do
-              skopeo --insecure-policy copy --all --preserve-digests docker://127.0.0.1:5000/image:$tag oci:image-$tag
-              diff --recursive ${image}/blobs image-$tag/blobs
+              for image in image=${image} two-platforms=${twoPlatforms}; do
+                repository=''${image%%=*} layout=''${image#*=}
+                skopeo --insecure-policy copy --all --preserve-digests docker://127.0.0.1:5000/$repository:$tag oci:$repository-$tag
+                diff --recursive $layout/blobs $repository-$tag/blobs
+                [[ $(jq '.manifests[0].digest' $layout/index.json) == $(jq '.manifests[0].digest' $repository-$tag/index.json) ]]
+              done
               wkg oci pull 127.0.0.1:5000/component:$tag --output component-$tag.wasm
               cmp ${component} component-$tag.wasm
               skopeo inspect --raw docker://127.0.0.1:5000/component:$tag > component-$tag.json
