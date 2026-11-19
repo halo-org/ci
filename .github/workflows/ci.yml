@@ -54,7 +54,7 @@ jobs:
           BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
       - name: Evaluate flake
         run: nix flake check --no-build
-      - name: Find checks
+      - name: Instantiate checks
         id: checks
         run: |
           checks=$(
@@ -85,7 +85,7 @@ jobs:
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
         env:
           BUILDERS: ${{ inputs.builders }}
-      - name: Send checks to builders
+      - name: Upload derivations
         if: inputs.builders != ''
         run: |
           for store in $(jq -r '.[].store | select(. != "")' <<< "$CHECKS" | sort -u); do
