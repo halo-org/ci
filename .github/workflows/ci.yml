@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      builders:
+        description: Remote builders in the Nix machines format, one per line.
+        type: string
+        default: ""
+      pin:
+        description: Name to pin the checks under on each builder used, after a push to the default branch.
+        type: string
+        default: ""
+    secrets:
+      builder-ssh-key:
+        description: SSH private key for every builder.
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    outputs:
+      checks: ${{ steps.checks.outputs.checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &nix
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - &ssh
+        name: Configure builders
+        if: inputs.builders != ''
+        run: |
+          mkdir -p -m 700 ~/.ssh
+          install -m 600 /dev/stdin ~/.ssh/builder <<< "$BUILDER_SSH_KEY"
+          printf 'IdentityFile ~/.ssh/builder\nIdentitiesOnly yes\nServerAliveInterval 30\n' > ~/.ssh/config
+          sed 's/#.*//' <<< "$BUILDERS" | while read -r uri _ _ _ _ _ _ key; do
+            host=${uri#*://}
+            host=${host%%\?*}
+            host=${host#*@}
+            if [[ $host == *:* ]]; then
+              host="[${host%:*}]:${host##*:}"
+            fi
+            if [[ -n $key && $key != - ]]; then
+              echo "$host $(base64 -d <<< "$key")" >> ~/.ssh/known_hosts
+            fi
+          done
+        env:
+          BUILDERS: ${{ inputs.builders }}
+          BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
+      - run: nix flake check --no-build
+      - name: List checks
+        id: checks
+        run: |
+          checks=$(
+            nix eval --json .#. --apply '
+              flake:
+              let
+                checks = flake.checks or { };
+              in
+              builtins.concatMap (
+                system:
+                map (name: {
+                  inherit system name;
+                  drv = checks.${system}.${name}.drvPath;
+                }) (builtins.attrNames (checks.${system} or { }))
+              ) [ "x86_64-linux" "aarch64-linux" ]
+            ' | jq -c --arg builders "$BUILDERS" '
+              [$builders | splits("\n") | sub("#.*"; "") | [splits("\\s+") | select(. != "")] | select(. != [])] as $builders
+              | (map(.system) | unique | length > 1) as $systems
+              | map(
+                  .system as $system
+                  | .store = ([$builders[] | select(.[1] // "" | split(",") | any(. == $system)) | .[0]] | first // "")
+                  | .title = if $systems then "\(.name) (\(.system))" else .name end
+                  | .runner = if .store == "" and .system == "aarch64-linux" then "ubuntu-24.04-arm" else "ubuntu-latest" end
+                )
+            '
+          )
+          jq . <<< "$checks"
+          echo "checks=$checks" >> "$GITHUB_OUTPUT"
+        env:
+          BUILDERS: ${{ inputs.builders }}
+      - name: Copy derivations to builders
+        if: inputs.builders != ''
+        run: |
+          for store in $(jq -r '.[].store | select(. != "")' <<< "$CHECKS" | sort -u); do
+            jq -r --arg store "$store" '.[] | select(.store == $store) | .drv' <<< "$CHECKS" | nix copy --stdin --to "$store"
+          done
+        env:
+          CHECKS: ${{ steps.checks.outputs.checks }}
+
+  build:
+    name: ${{ matrix.title }}
+    needs: eval
+    if: needs.eval.outputs.checks != '[]'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.eval.outputs.checks) }}
+    steps:
+      - if: matrix.store == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *nix
+      - *ssh
+      - if: matrix.store == ''
+        run: nix build -L --no-link ".#checks.$SYSTEM.\"$NAME\""
+        env:
+          SYSTEM: ${{ matrix.system }}
+          NAME: ${{ matrix.name }}
+      - if: matrix.store != ''
+        run: nix build -L --no-link --store "$STORE" "$DRV^*"
+        env:
+          STORE: ${{ matrix.store }}
+          DRV: ${{ matrix.drv }}
+
+  pin:
+    needs: [eval, build]
+    if: inputs.pin != '' && inputs.builders != '' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - *ssh
+      - run: |
+          if [[ ! $PIN =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "pin must contain only letters, digits, '.', '_' and '-'" >&2
+            exit 1
+          fi
+          for store in $(jq -r '.[].store | select(. != "")' <<< "$CHECKS" | sort -u); do
+            host=${store#*://}
+            jq -r --arg store "$store" '.[] | select(.store == $store) | .drv' <<< "$CHECKS" | ssh "ssh://${host%%\?*}" pin "$PIN"
+          done
+        env:
+          CHECKS: ${{ needs.eval.outputs.checks }}
+          PIN: ${{ inputs.pin }}
