@@ -25,6 +25,86 @@ now.
 
 A failed build fails its job and the run. The other checks keep building.
 
+## Artifacts
+
+A flake can say what kinds of artifact it produces with these outputs:
+
+- `packages.<system>.<name>`: packages, as in any flake.
+- `ociImages.<system>.<name>`: OCI images, as in the standard flake schemas.
+  Each is a derivation whose output is an OCI image layout directory with
+  `oci-layout`, `index.json` and `blobs/`. `index.json` refers to one image
+  index, which has an image manifest per platform.
+- `wasmComponents.<system>.<name>`: WebAssembly components. Each is a
+  derivation whose output is a single component file.
+
+Every output that holds derivations is keyed by the system that builds it,
+like `packages`. The key says nothing about where the artifact runs. A
+multi-platform image appears under each system that can assemble it.
+
+The attribute name is the artifact's name. The flake carries no version,
+destination or publishing policy. How an artifact is built is up to the
+repository.
+
+### Checks
+
+`lib.outputChecks self system` returns a check for each artifact the flake
+produces, to merge into `checks.<system>`:
+
+- `package-<name>` builds a package. A package that is the same derivation as
+  another, such as `default`, is not checked twice.
+- `image-<name>` builds an image and checks the layout: its image index lists
+  one image manifest per platform, and every blob is present with the size
+  and digest that refer to it.
+- `component-<name>` builds a component and checks that it is a valid
+  WebAssembly component and not a core module.
+
+The checks for a system cover the artifacts under that system. Outputs a flake
+does not have produce no checks. The library depends only on nixpkgs.
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    ci = {
+      url = "github:halo-org/ci";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs =
+    { self, nixpkgs, ci, ... }:
+    {
+      checks.x86_64-linux = ci.lib.outputChecks self "x86_64-linux" // {
+        # Other checks.
+      };
+    };
+}
+```
+
+### Schemas
+
+The standard [flake schemas](https://manual.determinate.systems/protocols/flake-schemas.html)
+in Determinate Nix already describe `ociImages`. `exportedSchemas.wasmComponents`
+describes `wasmComponents` in the same way. A flake's `schemas` output replaces
+the standard schemas rather than adding to them, so a flake that adds this
+schema merges the two. Without it, Determinate Nix shows `wasmComponents` as an
+unknown output.
+
+```nix
+{
+  inputs.flake-schemas.url = "github:DeterminateSystems/flake-schemas";
+
+  outputs =
+    { flake-schemas, ci, ... }:
+    {
+      schemas = flake-schemas.exportedSchemas // ci.exportedSchemas;
+    };
+}
+```
+
+Nix without flake schemas ignores `schemas` and warns about outputs it does
+not know.
+
 ## Without builders
 
 With no inputs, each check builds on a GitHub-hosted runner of its system:
@@ -87,6 +167,9 @@ jobs:
 
 ## Testing
 
-On pull requests, this repository calls the workflow on its own flake, which
-has a trivial check for each supported system. That covers the path without
-builders on both kinds of runner.
+On pull requests, this repository calls the workflow on its own flake. Its
+checks come from `lib.outputChecks`. A trivial package for each supported
+system covers the path without builders on both kinds of runner. A small image
+and component cover their checks, and a core module must fail the component
+check. Another job shows and checks the flake with Determinate Nix, using only
+its exported schema.
