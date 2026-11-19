@@ -64,20 +64,8 @@ would copy every output back to the runner.
 
 The builder's SSH user does not need to be a trusted Nix user.
 
-### `pin`
-
-A name to pin the checks under, using letters, digits, `.`, `_` and `-`.
-Empty by default.
-
-When set, after a push to the default branch and once every check has passed,
-the workflow runs `ssh <host> pin <name>` on each builder that built a check.
-It sends the derivation paths of the checks built there on stdin, one per
-line.
-
-This is not part of Nix. It is a command the builder has to provide. A
-builder that garbage collects its store can use it to keep the latest
-outputs of each repository. Each call should replace the set previously
-pinned under that name.
+The workflow does not manage the builder's store. Deciding what to keep and
+what to garbage collect is up to the builder.
 
 ## Secrets
 
@@ -93,7 +81,6 @@ jobs:
     uses: halo-org/ci/.github/workflows/ci.yml@main
     with:
       builders: ${{ vars.NIX_BUILDERS }}
-      pin: ${{ github.event.repository.name }}
     secrets:
       builder-ssh-key: ${{ secrets.NIX_BUILDER_SSH_KEY }}
 ```
