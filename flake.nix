@@ -83,10 +83,22 @@
             hello > $out
           '';
           default = hello;
+
+          publish-oci-registry = pkgs.writeShellApplication {
+            name = "publish-oci-registry";
+            runtimeInputs = [
+              pkgs.coreutils
+              pkgs.gnused
+              pkgs.jq
+              pkgs.skopeo
+              pkgs.wkg
+            ];
+            text = builtins.readFile ./publish-oci-registry.sh;
+          };
         }
       );
 
-      ociImages.x86_64-linux.hello = image;
+      ociImages.x86_64-linux.hello-image = image;
 
       wasmComponents.x86_64-linux.hello = component;
 
@@ -103,6 +115,57 @@
             drv = (self.lib.outputChecks { wasmComponents.${system}.module = module; } system).wasm-component-module;
             expectedBuilderLogEntries = [ "is a core WebAssembly module, not a component" ];
           };
+          publish-oci-registry-pushes-artifacts = pkgs.runCommand "publish-oci-registry-pushes-artifacts" {
+            nativeBuildInputs = [
+              pkgs.apacheHttpd
+              pkgs.curl
+              pkgs.distribution
+              pkgs.skopeo
+              pkgs.wkg
+              self.packages.${system}.publish-oci-registry
+            ];
+          } ''
+            export HOME=$PWD SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+            htpasswd -Bbn user password > htpasswd
+            cat > registry.yml <<EOF
+            version: 0.1
+            storage:
+              filesystem:
+                rootdirectory: $PWD/registry
+            http:
+              addr: 127.0.0.1:5000
+            auth:
+              htpasswd:
+                realm: test
+                path: $PWD/htpasswd
+            EOF
+            registry serve registry.yml &> registry.log &
+            curl --silent --retry 30 --retry-connrefused --retry-delay 1 --output /dev/null http://127.0.0.1:5000/v2/
+
+            cat > registries.conf <<EOF
+            [[registry]]
+            location = "127.0.0.1:5000"
+            insecure = true
+            EOF
+            export CONTAINERS_REGISTRIES_CONF=$PWD/registries.conf WKG_OCI_INSECURE=127.0.0.1:5000
+
+            export REGISTRY_USERNAME=user REGISTRY_PASSWORD=password
+            publish-oci-registry oci-image ${image} 127.0.0.1:5000/image one two
+            publish-oci-registry wasm-component ${component} 127.0.0.1:5000/component one two
+
+            export DOCKER_CONFIG=$PWD/docker REGISTRY_AUTH_FILE=$PWD/docker/config.json
+            skopeo login --username user --password-stdin 127.0.0.1:5000 <<< password
+            for tag in one two; do
+              skopeo --insecure-policy copy --all --preserve-digests docker://127.0.0.1:5000/image:$tag oci:image-$tag
+              diff --recursive ${image}/blobs image-$tag/blobs
+              wkg oci pull 127.0.0.1:5000/component:$tag --output component-$tag.wasm
+              cmp ${component} component-$tag.wasm
+              skopeo inspect --raw docker://127.0.0.1:5000/component:$tag > component-$tag.json
+            done
+            cmp component-one.json component-two.json
+            kill %1
+            touch $out
+          '';
         }
       );
     };
