@@ -18,14 +18,15 @@ jobs:
 ## What it builds
 
 The workflow checks out the calling repository and evaluates the flake at its
-root. It runs `nix flake check --no-build`, so any evaluation error that
-`nix flake check` would report still fails the run. It then lists every
-attribute of `checks.x86_64-linux` and `checks.aarch64-linux` and builds each
-one in its own job, named after the check. When the flake has checks for both
-systems, the job names also include the system. Other systems are ignored for
-now.
+root. It runs `nix flake check --no-build --all-systems`, so any evaluation
+error that `nix flake check` would report fails the run, for every system the
+flake has outputs for. It then builds every attribute of
+`checks.x86_64-linux` and `checks.aarch64-linux` in one job. Checks for other
+systems are evaluated but not built.
 
-A failed build fails its job and the run. The other checks keep building.
+A failed check fails the job. The other checks keep building. The run's
+summary lists every check with its result and the end of each failed check's
+log, and the job's log has each failed check's full log in its own group.
 
 ## Artifacts
 
@@ -174,11 +175,11 @@ not know.
 
 ## Without builders
 
-With no inputs, each check builds on a GitHub-hosted runner of its system:
-`ubuntu-latest` for `x86_64-linux` and `ubuntu-24.04-arm` for `aarch64-linux`.
-Each job checks out the repository and builds its check with `nix build`.
-Dependencies come from the substituters the flake already uses, such as
-cache.nixos.org.
+With no inputs, checks build on GitHub-hosted runners. The job runs on
+`ubuntu-latest` and builds the `x86_64-linux` checks there. A system that has
+checks but no builder needs a runner of its own, so `aarch64-linux` checks
+build in a second job on `ubuntu-24.04-arm`, after the first. Dependencies
+come from the substituters the flake already uses, such as cache.nixos.org.
 
 ## Inputs
 
@@ -204,10 +205,10 @@ uses the `builder-ssh-key` secret.
 
 A check with a matching builder builds there with
 `nix build --store <uri> <drv>^*`. Its outputs stay in the builder's store and
-nothing is copied back to the runner. The evaluation job copies the
-derivations to each builder once, so these jobs need no checkout and do not
-evaluate the flake again. This is not Nix's distributed build mode, which
-would copy every output back to the runner.
+nothing is copied back to the runner. The job copies the derivations to each
+builder and starts the builds from the runner, so one job can use builders
+for several systems. This is not Nix's distributed build mode, which would
+copy every output back to the runner.
 
 The builder's SSH user does not need to be a trusted Nix user.
 

@@ -20,20 +20,21 @@ defaults:
     shell: bash
 
 jobs:
-  eval:
-    name: Evaluate
+  build:
+    name: Build
     runs-on: ubuntu-latest
+    env:
+      SYSTEM: x86_64-linux
+      BUILDERS: ${{ inputs.builders }}
     outputs:
-      checks: ${{ steps.checks.outputs.checks }}
-    steps:
+      aarch64: ${{ steps.checks.outputs.aarch64 }}
+    steps: &steps
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - &nix
-        name: Install Nix
+      - name: Install Nix
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
-      - &ssh
-        name: Set up builders
-        if: inputs.builders != ''
+      - name: Set up builders
+        if: env.BUILDERS != ''
         run: |
           mkdir -p -m 700 ~/.ssh
           install -m 600 /dev/stdin ~/.ssh/builder <<< "$BUILDER_SSH_KEY"
@@ -50,10 +51,9 @@ jobs:
             fi
           done
         env:
-          BUILDERS: ${{ inputs.builders }}
           BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
       - name: Evaluate flake
-        run: nix flake check --no-build
+        run: nix flake check --no-build --all-systems
       - name: Instantiate checks
         id: checks
         run: |
@@ -65,59 +65,117 @@ jobs:
               in
               builtins.concatMap (
                 system:
-                map (name: {
-                  inherit system name;
-                  drv = checks.${system}.${name}.drvPath;
-                }) (builtins.attrNames (checks.${system} or { }))
+                map (
+                  name:
+                  let
+                    check = checks.${system}.${name};
+                  in
+                  {
+                    inherit system name;
+                    drv = check.drvPath;
+                    outputs = map (output: check.${output}.outPath) check.outputs;
+                  }
+                ) (builtins.attrNames (checks.${system} or { }))
               ) [ "x86_64-linux" "aarch64-linux" ]
-            ' | jq -c --arg builders "$BUILDERS" '
+            ' | jq -c --arg builders "$BUILDERS" --arg system "$SYSTEM" '
               [$builders | splits("\n") | sub("#.*"; "") | [splits("\\s+") | select(. != "")] | select(. != [])] as $builders
-              | (map(.system) | unique | length > 1) as $systems
               | map(
                   .system as $system
                   | .store = ([$builders[] | select(.[1] // "" | split(",") | any(. == $system)) | .[0]] | first // "")
-                  | .title = if $systems then "\(.name) (\(.system))" else .name end
-                  | .runner = if .store == "" and .system == "aarch64-linux" then "ubuntu-24.04-arm" else "ubuntu-latest" end
                 )
+              | map(.here = (.store != "" or .system == $system))
             '
           )
-          jq . <<< "$checks"
-          echo "checks=$checks" >> "$GITHUB_OUTPUT"
-        env:
-          BUILDERS: ${{ inputs.builders }}
+          echo "checks=$(jq -c 'map(select(.here))' <<< "$checks")" >> "$GITHUB_OUTPUT"
+          echo "aarch64=$(jq 'any(.[]; .here | not)' <<< "$checks")" >> "$GITHUB_OUTPUT"
       - name: Upload derivations
-        if: inputs.builders != ''
+        if: env.BUILDERS != ''
         run: |
           for store in $(jq -r '.[].store | select(. != "")' <<< "$CHECKS" | sort -u); do
             jq -r --arg store "$store" '.[] | select(.store == $store) | .drv' <<< "$CHECKS" | nix copy --stdin --to "$store"
           done
         env:
           CHECKS: ${{ steps.checks.outputs.checks }}
-
-  build:
-    name: ${{ matrix.title }}
-    needs: eval
-    if: needs.eval.outputs.checks != '[]'
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.eval.outputs.checks) }}
-    steps:
-      - name: Checkout
-        if: matrix.store == ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - *nix
-      - *ssh
       - name: Build
         run: |
-          if [[ -n $STORE ]]; then
-            nix build -L --no-link --store "$STORE" "$DRV^*"
-          else
-            nix build -L --no-link ".#checks.$SYSTEM.\"$NAME\""
+          if [[ $CHECKS == '[]' ]]; then
+            echo "No checks to build."
+            exit 0
           fi
+          log=$RUNNER_TEMP/build.log
+          missing=$RUNNER_TEMP/missing
+          mapfile -t stores < <(jq -r '[.[].store] | unique | .[]' <<< "$CHECKS")
+
+          build() {
+            local drvs
+            mapfile -t drvs < <(jq -r --arg store "$1" '.[] | select(.store == $store) | "\(.drv)^*"' <<< "$CHECKS")
+            nix build -L --no-link --keep-going ${1:+--store "$1"} "${drvs[@]}"
+          }
+          {
+            for store in "${stores[@]}"; do
+              build "$store" &
+            done
+            wait
+          } 2>&1 | tee "$log" || true
+
+          # A check passed if every output it should have is in the store.
+          : > "$missing"
+          for store in "${stores[@]}"; do
+            if ! jq -r --arg store "$store" '.[] | select(.store == $store) | .outputs[]' <<< "$CHECKS" |
+              xargs nix-store ${store:+--store "$store"} --check-validity --print-invalid >> "$missing"; then
+              echo "::error::Could not tell which checks were built"
+              exit 1
+            fi
+          done
+
+          systems=$(jq '[.[].system] | unique | length' <<< "$CHECKS")
+          failed=0
+          printf '| Check | Result |\n| --- | --- |\n' >> "$GITHUB_STEP_SUMMARY"
+          details=$RUNNER_TEMP/details
+          : > "$details"
+          while IFS=$'\t' read -r name system drv passed; do
+            if ((systems > 1)); then
+              name="$name ($system)"
+            fi
+            if [[ $passed == true ]]; then
+              echo "| $name | ✅ |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            failed=1
+            echo "| $name | ❌ |" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=$name::Check failed"
+            # Nix prefixes each log line with the derivation name without its version.
+            prefix=$(basename "$drv" .drv | sed -E 's/^[^-]*-//; s/-[0-9].*$//')
+            lines=$(awk -v prefix="$prefix> " 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1) }' "$log")
+            if [[ -z $lines ]]; then
+              lines="No log from this check. It failed without output, or something it depends on failed to build."
+            fi
+            echo "::group::$name"
+            echo "$lines"
+            echo "::endgroup::"
+            {
+              printf '\n<details><summary>%s</summary>\n\n````text\n' "$name"
+              tail -n 50 <<< "$lines"
+              printf '````\n\n</details>\n'
+            } >> "$details"
+          done < <(
+            jq -r --rawfile missing "$missing" '
+              ($missing | split("\n")) as $missing
+              | .[] | [.name, .system, .drv, (.outputs - $missing == .outputs)] | @tsv
+            ' <<< "$CHECKS"
+          )
+          cat "$details" >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
         env:
-          SYSTEM: ${{ matrix.system }}
-          NAME: ${{ matrix.name }}
-          STORE: ${{ matrix.store }}
-          DRV: ${{ matrix.drv }}
+          CHECKS: ${{ steps.checks.outputs.checks }}
+
+  # Checks for a system with no builder need a runner of that system.
+  build-aarch64:
+    name: Build (aarch64-linux)
+    needs: build
+    if: ${{ !cancelled() && needs.build.outputs.aarch64 == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    env:
+      SYSTEM: aarch64-linux
+      BUILDERS: ""
+    steps: *steps
