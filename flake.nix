@@ -15,28 +15,22 @@
     {
       lib = import ./lib nixpkgs;
 
-      exportedSchemas = import ./lib/schemas.nix;
-
-      packages = lib.genAttrs systems (
-        system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-        in
-        {
-          # The publishing workflow runs this.
-          publish-oci-registry = pkgs.writeShellApplication {
+      # The publishing workflow runs this.
+      packages = lib.genAttrs systems (system: {
+        publish-oci-registry =
+          with nixpkgs.legacyPackages.${system};
+          writeShellApplication {
             name = "publish-oci-registry";
             runtimeInputs = [
-              pkgs.coreutils
-              pkgs.gnused
-              pkgs.jq
-              pkgs.skopeo
-              pkgs.wkg
+              coreutils
+              gnused
+              jq
+              skopeo
+              wkg
             ];
             text = builtins.readFile ./scripts/publish-oci-registry.sh;
           };
-        }
-      );
+      });
 
       checks = lib.genAttrs systems (
         system: self.lib.outputChecks self system // import ./tests { inherit self nixpkgs; } system

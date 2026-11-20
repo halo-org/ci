@@ -6,18 +6,8 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  check:
+    name: Check
     uses: ./.github/workflows/ci.yml
-
-  schemas:
-    name: Schemas
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Determinate Nix
-        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - name: Show outputs
-        run: nix flake show --default-flake-schemas . .
-      - name: Check outputs
-        run: nix flake check --no-build --default-flake-schemas . .
+    with:
+      systems: '["x86_64-linux", "aarch64-linux"]'

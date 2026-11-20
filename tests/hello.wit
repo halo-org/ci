@@ -1,5 +1,0 @@
-package test:hello;
-
-world hello {
-  export hello: func() -> string;
-}

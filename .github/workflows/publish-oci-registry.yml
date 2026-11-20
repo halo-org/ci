@@ -8,7 +8,7 @@ on:
         type: string
         required: true
       tags:
-        description: Tags to push every artifact under, separated by whitespace.
+        description: Tags to publish every artifact under, separated by whitespace.
         type: string
         required: true
       username:
@@ -27,30 +27,21 @@ on:
         description: SSH private key for every builder.
         required: false
 
-# The calling repository is checked out in repository, and this one, for its
-# scripts, in workflow.
-defaults:
-  run:
-    shell: bash
-    working-directory: repository
-
-env:
-  BUILDERS: ${{ inputs.builders }}
-
 jobs:
-  eval:
-    name: Evaluate
+  list:
+    name: List
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
-      artifacts: ${{ steps.artifacts.outputs.artifacts }}
+      artifacts: ${{ steps.list.outputs.artifacts }}
     steps:
       - &checkout
         name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: repository
+      # This repository, for the scripts.
       - &checkout-workflow
         name: Checkout workflow
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,54 +52,41 @@ jobs:
       - &install-nix
         name: Install Nix
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
-      - &set-up-builders
-        name: Set up builders
-        if: env.BUILDERS != ''
-        run: ../workflow/scripts/set-up-builders.sh
-        env:
-          BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
-      - name: Instantiate artifacts
-        id: artifacts
-        run: ../workflow/scripts/instantiate-artifacts.sh
+      - name: List artifacts
+        id: list
+        working-directory: repository
+        run: ../workflow/scripts/list-artifacts.sh
         env:
           TO: ${{ inputs.to }}
-      - name: Upload derivations
-        if: env.BUILDERS != ''
-        run: ../workflow/scripts/upload-derivations.sh <<< "$ARTIFACTS"
-        env:
-          ARTIFACTS: ${{ steps.artifacts.outputs.artifacts }}
+          BUILDERS: ${{ inputs.builders }}
+          BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
 
-  # This job has the caller's permissions, which the registry may need.
+  # One job for each artifact, with the caller's permissions, which the
+  # registry may need.
   publish:
     name: ${{ matrix.name }}
-    needs: eval
-    if: needs.eval.outputs.artifacts != '[]'
-    runs-on: ${{ matrix.runner }}
+    needs: list
+    if: needs.list.outputs.artifacts != '[]'
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.eval.outputs.artifacts) }}
+        include: ${{ fromJSON(needs.list.outputs.artifacts) }}
     steps:
       - *checkout
       - *checkout-workflow
       - *install-nix
-      - *set-up-builders
-      - name: Build
-        id: build
-        run: ../workflow/scripts/build-artifact.sh
+      - name: Publish
+        working-directory: repository
+        run: ../workflow/scripts/publish-artifact.sh
         env:
-          STORE: ${{ matrix.store }}
+          KIND: ${{ matrix.kind }}
           DRV: ${{ matrix.drv }}
           OUTPUT: ${{ matrix.output }}
           ATTRIBUTE: ${{ matrix.attribute }}
-      - name: Push
-        run: |
-          set -f
-          nix run ../workflow#publish-oci-registry -- "$KIND" "$ARTIFACT" "$REPOSITORY" $TAGS
-        env:
-          KIND: ${{ matrix.kind }}
-          ARTIFACT: ${{ steps.build.outputs.path }}
           REPOSITORY: ${{ matrix.repository }}
           TAGS: ${{ inputs.tags }}
           REGISTRY_USERNAME: ${{ inputs.username }}
           REGISTRY_PASSWORD: ${{ secrets.password }}
+          BUILDERS: ${{ inputs.builders }}
+          BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
