@@ -34,10 +34,10 @@ is passed by the caller.
 
 ## Checking
 
-`ci.yml` runs `nix flake check --no-build --all-systems`, so an evaluation
-error in any output for any system fails the run. It then builds every
-attribute of `checks.<system>` and keeps going when one fails. The run's
-summary lists the derivations that failed to build.
+`ci.yml` builds every attribute of `checks.<system>` and keeps going when one
+fails. The run's summary lists the derivations that failed to build. Alongside
+the build it runs `nix flake check --no-build --all-systems`, so an evaluation
+error in any output for any system also fails the run.
 
 - `systems`: the systems to build checks for, as a JSON list. The default is
   `["x86_64-linux"]`. `aarch64-linux` is the other system supported. Each
