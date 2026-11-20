@@ -104,10 +104,10 @@ ociImages.x86_64-linux.app = ci.lib.ociImage "x86_64-linux" {
 - `layers`: packages that get layers of their own, from the bottom up.
   Optional.
 
-The image holds the closure of the store paths that `entrypoint` and `env`
-refer to, at their paths in `/nix/store`, and nothing else. There is no shell
-and no `/etc` or `/tmp`. The image is for the platform of `system`, which also
-builds it.
+The image holds the closure of the store paths that `entrypoint`, `env` and
+`layers` refer to, at their paths in `/nix/store`, and nothing else. There is
+no shell and no `/etc` or `/tmp`. The image is for the platform of `system`,
+which also builds it.
 
 Each package in `layers` gets a layer that holds its closure, except what lower
 layers hold. A last layer holds the rest of the image. Each layer is its own
@@ -116,7 +116,7 @@ application changes, only the last layer is built again and the other layers
 keep their digests, so a registry that has them does not receive them again.
 Give the parts of the closure that rarely change their own layers, such as
 libc, certificates or a language runtime. A package that is not in the image's
-closure fails the build.
+closure is added to the image.
 
 The same derivation always builds the same image. Layers are tar archives with
 sorted entries, hard links stored as files, and fixed times, owners and modes.
@@ -330,25 +330,30 @@ The first argument is `oci-image` or `wasm-component`. With
 with them. Otherwise skopeo and wkg use the logins that `docker login` saved.
 It prints each reference it pushed with its digest.
 
+## This repository
+
+- `.github/workflows` has the two workflows other repositories call, and the
+  one that tests this repository.
+- `scripts` has what the steps of those workflows run.
+- `lib` is the flake's library and schema.
+- `tests` has this repository's checks. Nothing in it is part of what the
+  flake offers.
+
 ## Testing
 
-On pull requests, this repository calls the workflow on its own flake. Its
-checks come from `lib.outputChecks`. A trivial package for each supported
-system covers the path without builders on both kinds of runner. An image built
-with `lib.ociImage`, an image for two platforms built by hand and a component
-cover their checks, and a core module must fail the component check. The image
-built with `lib.ociImage` must hold exactly its closure, an index of it alone
-must be the same image, and an index of it twice must fail. An image of a tool
-the builder uses itself, and an index of it, must have no references in the Nix
-store. Another job shows and checks the flake with Determinate Nix, using only
-its exported schema.
+`nix flake check` builds the tests. They check artifacts made the way a flake
+that uses the library would make them: a package, an image built with
+`lib.ociImage`, an image for two platforms and a component. They cover what
+the generated checks accept and reject, what an image holds, that an image
+refers to nothing in the Nix store, and how images combine into an index.
 
-The `publish-oci-registry-pushes-artifacts` check starts a registry that
-requires a login inside the Nix build. It publishes both images and the
-component under two tags with the program the publishing workflow runs, then
-pulls them back. Each image must come back with the same image index digest
-and every blob of the built layout, the component must match byte for byte,
-and both tags must refer to the same manifest. The publishing workflow itself
-is not run on pull requests, because its jobs cannot reach a registry without
-credentials for a real one. Its evaluation, the jobs it starts and the way
-they fetch from builders are only tested by calling it.
+One test starts a registry that requires a login and publishes the images and
+the component to it under two tags with the program the publishing workflow
+runs. Each image must come back with the same image index digest and every
+blob, the component must match byte for byte, and both tags must refer to the
+same manifest.
+
+A pull request runs the checking workflow on this flake, without builders, on
+both kinds of runner. Another job checks the exported schema with Determinate
+Nix. The publishing workflow is not run on pull requests, because its jobs
+need a registry they can reach. It is only tested by calling it.
