@@ -1,14 +1,19 @@
-# Writes an image layer that holds the store paths listed on standard input.
-# The layer is a gzip-compressed tar archive in $1/blob, and $1/layer.json
-# holds its descriptor and diff ID. The archive is the same however the store
-# lays out its files: entries are sorted, hard links are stored as files, and
-# times, owners and modes are normalised.
+# Writes an image layer to $1. It holds the store paths listed in the file $2
+# that are not listed in the file $3 and are not among the remaining
+# arguments. $1/blob is the layer, a gzip-compressed tar archive, and
+# $1/layer.json has its descriptor and diff ID.
+#
+# The archive is the same however the store lays out its files: entries are
+# sorted, hard links are stored as files, and times, owners and modes are
+# normalised.
 
 set -euo pipefail
+export LC_ALL=C
 
-out=$1
+out=$1 include=$2 exclude=$3
+shift 3
 
-sed 's|^/||' | LC_ALL=C sort > paths
+comm -23 <(sort "$include") <(sort "$exclude" <(printf '%s\n' "$@")) | sed 's|^/||' > paths
 mkdir -p root/nix/store
 tar --create --file layer.tar \
   --format posix --pax-option exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \

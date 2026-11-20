@@ -27,9 +27,15 @@ on:
         description: SSH private key for every builder.
         required: false
 
+# The calling repository is checked out in repository, and this one, for its
+# scripts, in workflow.
 defaults:
   run:
     shell: bash
+    working-directory: repository
+
+env:
+  BUILDERS: ${{ inputs.builders }}
 
 jobs:
   eval:
@@ -40,90 +46,39 @@ jobs:
     outputs:
       artifacts: ${{ steps.artifacts.outputs.artifacts }}
     steps:
-      - name: Checkout
+      - &checkout
+        name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - &nix
+        with:
+          path: repository
+      - &checkout-workflow
+        name: Checkout workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: workflow
+      - &install-nix
         name: Install Nix
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
-      - &ssh
+      - &set-up-builders
         name: Set up builders
-        if: inputs.builders != ''
-        run: |
-          mkdir -p -m 700 ~/.ssh
-          install -m 600 /dev/stdin ~/.ssh/builder <<< "$BUILDER_SSH_KEY"
-          printf 'IdentityFile ~/.ssh/builder\nIdentitiesOnly yes\nServerAliveInterval 30\n' > ~/.ssh/config
-          sed 's/#.*//' <<< "$BUILDERS" | while read -r uri _ _ _ _ _ _ key; do
-            host=${uri#*://}
-            host=${host%%\?*}
-            host=${host#*@}
-            if [[ $host == *:* ]]; then
-              host="[${host%:*}]:${host##*:}"
-            fi
-            if [[ -n $key && $key != - ]]; then
-              echo "$host $(base64 -d <<< "$key")" >> ~/.ssh/known_hosts
-            fi
-          done
+        if: env.BUILDERS != ''
+        run: ../workflow/scripts/set-up-builders.sh
         env:
-          BUILDERS: ${{ inputs.builders }}
           BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
       - name: Instantiate artifacts
         id: artifacts
-        run: |
-          artifacts=$(
-            nix eval --json .#. --apply '
-              flake:
-              let
-                systems = [ "x86_64-linux" "aarch64-linux" ];
-                kinds = {
-                  ociImages = "oci-image";
-                  wasmComponents = "wasm-component";
-                };
-              in
-              builtins.concatMap (
-                output:
-                builtins.attrValues (
-                  builtins.zipAttrsWith (
-                    name: candidates:
-                    let
-                      inherit (builtins.head candidates) system drv;
-                    in
-                    {
-                      inherit name system;
-                      kind = kinds.${output};
-                      attribute = "${output}.${system}.\"${name}\"";
-                      drv = drv.drvPath;
-                      output = drv.outputName;
-                    }
-                  ) (map (system: builtins.mapAttrs (_: drv: { inherit system drv; }) (flake.${output}.${system} or { })) systems)
-                )
-              ) (builtins.attrNames kinds)
-            ' | jq -c --arg builders "$BUILDERS" --arg to "$TO" '
-              [$builders | splits("\n") | sub("#.*"; "") | [splits("\\s+") | select(. != "")] | select(. != [])] as $builders
-              | map(
-                  .system as $system
-                  | .name as $name
-                  | .store = ([$builders[] | select(.[1] // "" | split(",") | any(. == $system)) | .[0]] | first // "")
-                  | .repository = ($to | gsub("\\{name\\}"; $name))
-                  | .runner = if .store == "" and .system == "aarch64-linux" then "ubuntu-24.04-arm" else "ubuntu-latest" end
-                )
-              | (group_by(.repository) | map(select(length > 1)[0].repository)) as $shared
-              | if $shared != [] then error("more than one artifact would be pushed to \($shared | join(", "))") else . end
-            '
-          )
-          jq . <<< "$artifacts"
-          echo "artifacts=$artifacts" >> "$GITHUB_OUTPUT"
+        run: ../workflow/scripts/instantiate-artifacts.sh
         env:
-          BUILDERS: ${{ inputs.builders }}
           TO: ${{ inputs.to }}
       - name: Upload derivations
-        if: inputs.builders != ''
-        run: |
-          for store in $(jq -r '.[].store | select(. != "")' <<< "$ARTIFACTS" | sort -u); do
-            jq -r --arg store "$store" '.[] | select(.store == $store) | .drv' <<< "$ARTIFACTS" | nix copy --stdin --to "$store"
-          done
+        if: env.BUILDERS != ''
+        run: ../workflow/scripts/upload-derivations.sh <<< "$ARTIFACTS"
         env:
           ARTIFACTS: ${{ steps.artifacts.outputs.artifacts }}
 
+  # This job has the caller's permissions, which the registry may need.
   publish:
     name: ${{ matrix.name }}
     needs: eval
@@ -134,33 +89,23 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.eval.outputs.artifacts) }}
     steps:
-      - name: Checkout
-        if: matrix.store == ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - *nix
-      - *ssh
+      - *checkout
+      - *checkout-workflow
+      - *install-nix
+      - *set-up-builders
       - name: Build
         id: build
-        run: |
-          if [[ -n $STORE ]]; then
-            path=$(nix build -L --no-link --print-out-paths --store "$STORE" "$DRV^$OUTPUT")
-            nix copy --no-check-sigs --from "$STORE" "$path"
-          else
-            path=$(nix build -L --no-link --print-out-paths ".#$ATTRIBUTE^$OUTPUT")
-          fi
-          echo "path=$path" >> "$GITHUB_OUTPUT"
+        run: ../workflow/scripts/build-artifact.sh
         env:
-          ATTRIBUTE: ${{ matrix.attribute }}
-          OUTPUT: ${{ matrix.output }}
           STORE: ${{ matrix.store }}
           DRV: ${{ matrix.drv }}
+          OUTPUT: ${{ matrix.output }}
+          ATTRIBUTE: ${{ matrix.attribute }}
       - name: Push
         run: |
           set -f
-          nix run "github:$WORKFLOW_REPOSITORY/$WORKFLOW_SHA#publish-oci-registry" -- "$KIND" "$ARTIFACT" "$REPOSITORY" $TAGS
+          nix run ../workflow#publish-oci-registry -- "$KIND" "$ARTIFACT" "$REPOSITORY" $TAGS
         env:
-          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          WORKFLOW_SHA: ${{ job.workflow_sha }}
           KIND: ${{ matrix.kind }}
           ARTIFACT: ${{ steps.build.outputs.path }}
           REPOSITORY: ${{ matrix.repository }}
