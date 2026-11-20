@@ -3,6 +3,10 @@ name: CI
 on:
   workflow_call:
     inputs:
+      systems:
+        description: Systems to build the flake's checks for, as a JSON list.
+        type: string
+        default: '["x86_64-linux"]'
       builders:
         description: Remote builders in the Nix machines format, one per line.
         type: string
@@ -15,27 +19,20 @@ on:
 permissions:
   contents: read
 
-# The calling repository is checked out in repository, and this one, for its
-# scripts, in workflow.
-defaults:
-  run:
-    shell: bash
-    working-directory: repository
-
 jobs:
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    env:
-      SYSTEM: x86_64-linux
-      BUILDERS: ${{ inputs.builders }}
-    outputs:
-      aarch64: ${{ steps.checks.outputs.aarch64 }}
-    steps: &steps
+  check:
+    name: ${{ matrix.system }}
+    runs-on: ${{ matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        system: ${{ fromJSON(inputs.systems) }}
+    steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: repository
+      # This repository, for the script.
       - name: Checkout workflow
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,33 +41,9 @@ jobs:
           path: workflow
       - name: Install Nix
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
-      - name: Set up builders
-        if: env.BUILDERS != ''
-        run: ../workflow/scripts/set-up-builders.sh
+      - name: Check
+        working-directory: repository
+        run: ../workflow/scripts/check.sh
         env:
+          BUILDERS: ${{ inputs.builders }}
           BUILDER_SSH_KEY: ${{ secrets.builder-ssh-key }}
-      - name: Evaluate flake
-        run: nix flake check --no-build --all-systems
-      - name: Instantiate checks
-        id: checks
-        run: ../workflow/scripts/instantiate-checks.sh
-      - name: Upload derivations
-        if: env.BUILDERS != ''
-        run: ../workflow/scripts/upload-derivations.sh <<< "$CHECKS"
-        env:
-          CHECKS: ${{ steps.checks.outputs.checks }}
-      - name: Build
-        run: ../workflow/scripts/build-checks.sh <<< "$CHECKS"
-        env:
-          CHECKS: ${{ steps.checks.outputs.checks }}
-
-  # Checks for a system with no builder need a runner of that system.
-  build-aarch64:
-    name: Build (aarch64-linux)
-    needs: build
-    if: ${{ !cancelled() && needs.build.outputs.aarch64 == 'true' }}
-    runs-on: ubuntu-24.04-arm
-    env:
-      SYSTEM: aarch64-linux
-      BUILDERS: ""
-    steps: *steps
